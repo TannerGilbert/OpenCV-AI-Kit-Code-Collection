@@ -1,0 +1,4 @@
+depthai==0.4.0.0
+scipy==1.4.1
+opencv_python==4.5.1.48
+numpy==1.19.2
