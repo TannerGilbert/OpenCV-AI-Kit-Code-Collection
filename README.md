@@ -4,6 +4,8 @@
 
 ## Examples
 * [Running a Tensorflow Object Detection API model on the OAK](Tensorflow-OD-API)
+* [Cumulative Object Counting](Cumulative-Object-Counting)
+* [Yolov3 Object Detection](Yolov3)
 
 ## Resources
 * [DepthAI's documentation](https://docs.luxonis.com/en/latest)
