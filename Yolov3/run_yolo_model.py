@@ -1,4 +1,4 @@
-#based on https://github.com/luxonis/depthai-python/blob/main/examples/22_tiny_yolo_v3_device_side_decoding.py
+# based on https://github.com/luxonis/depthai-python/blob/main/examples/22_tiny_yolo_v3_device_side_decoding.py
 from pathlib import Path
 import sys
 import cv2
@@ -19,19 +19,19 @@ label_map = ["person",         "bicycle",    "car",           "motorbike",     "
              "chair",          "sofa",       "pottedplant",   "bed",           "diningtable", "toilet",        "tvmonitor",
              "laptop",         "mouse",      "remote",        "keyboard",      "cell phone",  "microwave",     "oven",
              "toaster",        "sink",       "refrigerator",  "book",          "clock",       "vase",          "scissors",
-             "teddy bear",     "hair drier", "toothbrush"]  
-
+             "teddy bear",     "hair drier", "toothbrush"]
 
 syncNN = True
 
 # Get argument first
-tiny_yolo_v3_path = str((Path(__file__).parent / Path('models/model.blob')).resolve().absolute())
+tiny_yolo_v3_path = str((Path(__file__).parent / Path(
+    'models/frozen_darknet_yolov3_model_openvino_2021.3_5shave.blob')).resolve().absolute())
 if len(sys.argv) > 1:
     tiny_yolo_v3_path = sys.argv[1]
 
 # Start defining a pipeline
 pipeline = dai.Pipeline()
-pipeline.setOpenVINOVersion(dai.OpenVINO.Version.VERSION_2021_1)
+pipeline.setOpenVINOVersion(dai.OpenVINO.Version.VERSION_2021_2)
 
 # Define a source - color camera
 cam_rgb = pipeline.createColorCamera()
@@ -39,15 +39,15 @@ cam_rgb.setPreviewSize(416, 416)
 cam_rgb.setInterleaved(False)
 cam_rgb.setFps(40)
 
-#network specific settings
+# network specific settings
 detectionNetwork = pipeline.createYoloDetectionNetwork()
 detectionNetwork.setConfidenceThreshold(0.5)
 detectionNetwork.setNumClasses(80)
 detectionNetwork.setCoordinateSize(4)
-anchors = np.array([10,14, 23,27, 37,58, 81,82, 135,169, 344,319])
+anchors = np.array([10, 14, 23, 27, 37, 58, 81, 82, 135, 169, 344, 319])
 detectionNetwork.setAnchors(anchors)
-anchorMasks26 = np.array([1,2,3])
-anchorMasks13 = np.array([3,4,5])
+anchorMasks26 = np.array([1, 2, 3])
+anchorMasks13 = np.array([3, 4, 5])
 anchorMasks = {
     "side26": anchorMasks26,
     "side13": anchorMasks13,
@@ -105,9 +105,9 @@ with dai.Device(pipeline) as device:
 
         if in_nn is not None:
             bboxes = in_nn.detections
-            counter+=1
+            counter += 1
             current_time = time.time()
-            if (current_time - start_time) > 1 :
+            if (current_time - start_time) > 1:
                 fps = counter / (current_time - start_time)
                 counter = 0
                 start_time = current_time
@@ -117,9 +117,9 @@ with dai.Device(pipeline) as device:
         if frame is not None:
             # if the frame is available, draw bounding boxes on it and show the frame
             height = frame.shape[0]
-            width  = frame.shape[1]
+            width = frame.shape[1]
             for bbox in bboxes:
-                #denormalize bounging box
+                # denormalize bounging box
                 x1 = int(bbox.xmin * width)
                 x2 = int(bbox.xmax * width)
                 y1 = int(bbox.ymin * height)
@@ -128,11 +128,15 @@ with dai.Device(pipeline) as device:
                     label = label_map[bbox.label]
                 except:
                     label = bbox.label
-                cv2.putText(frame, str(label), (x1 + 10, y1 + 20), cv2.FONT_HERSHEY_TRIPLEX, 0.5, color)
-                cv2.putText(frame, "{:.2f}".format(bbox.confidence*100), (x1 + 10, y1 + 40), cv2.FONT_HERSHEY_TRIPLEX, 0.5, color)
-                cv2.rectangle(frame, (x1, y1), (x2, y2), color, cv2.FONT_HERSHEY_SIMPLEX)
+                cv2.putText(frame, str(label), (x1 + 10, y1 + 20),
+                            cv2.FONT_HERSHEY_TRIPLEX, 0.5, color)
+                cv2.putText(frame, "{:.2f}".format(
+                    bbox.confidence*100), (x1 + 10, y1 + 40), cv2.FONT_HERSHEY_TRIPLEX, 0.5, color)
+                cv2.rectangle(frame, (x1, y1), (x2, y2),
+                              color, cv2.FONT_HERSHEY_SIMPLEX)
 
-            cv2.putText(frame, "NN fps: {:.2f}".format(fps), (2, frame.shape[0] - 4), cv2.FONT_HERSHEY_TRIPLEX, 0.4, color)
+            cv2.putText(frame, "NN fps: {:.2f}".format(
+                fps), (2, frame.shape[0] - 4), cv2.FONT_HERSHEY_TRIPLEX, 0.4, color)
             cv2.imshow("rgb", frame)
 
         if cv2.waitKey(1) == ord('q'):

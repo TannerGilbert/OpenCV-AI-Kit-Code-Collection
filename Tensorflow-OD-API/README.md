@@ -18,18 +18,25 @@ After you have an exported model (.pb file), you can convert it into an OpenVINO
 
 1. Installation
     ```python
-    %%time
-    %%capture
-    ## install tools. Open Vino takes some time to download: 10-15 min sometimes.
+    import os
+    from urllib.parse import urlparse
+
+    ## install tools. Open Vino takes some time to download - it's ~400MB
     !sudo apt-get install -y pciutils cpio
     !sudo apt autoremove
-    ## download installation files
-    !wget http://registrationcenter-download.intel.com/akdlm/irc_nas/16345/l_openvino_toolkit_p_2020.1.023.tgz
-    path = 'l_openvino_toolkit_p_2020.1.023.tgz'
-    # path = "/content/software/Intel OpenVINO 2019 R3.1/l_openvino_toolkit_p_2019.3.376.tgz"
-    ## install openvino
-    !tar xf '{path}'
-    %cd l_openvino_toolkit_p_2020.1.023/
+
+    ## downnload installation files
+    url = "https://registrationcenter-download.intel.com/akdlm/irc_nas/17662/l_openvino_toolkit_p_2021.3.394.tgz"
+    !wget {url}
+
+    ## Get the name of the tgz
+    parsed = urlparse(url)
+    openvino_tgz = os.path.basename(parsed.path)
+    openvino_folder = os.path.splitext(openvino_tgz)[0]
+
+    ## Extract & install openvino
+    !tar xf {openvino_tgz}
+    %cd {openvino_folder}
     !./install_openvino_dependencies.sh && \
         sed -i 's/decline/accept/g' silent.cfg && \
         ./install.sh --silent silent.cfg
@@ -39,68 +46,39 @@ After you have an exported model (.pb file), you can convert it into an OpenVINO
     output_dir = '/content/output'
 
     %cd '/content/ssd_mobilenet_v2_coco_2018_03_29/'
-    !source /opt/intel/openvino/bin/setupvars.sh && \
-        python /opt/intel/openvino/deployment_tools/model_optimizer/mo.py \
+    !source /opt/intel/openvino_2021/bin/setupvars.sh && \
+        python /opt/intel/openvino_2021/deployment_tools/model_optimizer/mo.py \
         --input_model frozen_inference_graph.pb \
-        --tensorflow_use_custom_operations_config /opt/intel/openvino/deployment_tools/model_optimizer/extensions/front/tf/ssd_v2_support.json \
-        --tensorflow_object_detection_api_pipeline_config pipeline.config \
+        --tensorflow_use_custom_operations_config /opt/intel/openvino_2021/deployment_tools/model_optimizer/extensions/front/tf/ssd_v2_support.json \
+        --tensorflow_object_detection_api_pipeline_config /content/ssd_mobilenet_v2_coco.config \
         --reverse_input_channels \
         --output_dir {output_dir} \
-        --data_type FP16  
+        --data_type FP16
     ```
 
 ## Compile the IR model to a .blob for use on DepthAI modules/platform
 
-After converting your model into OpenVINO IR format, you can compile it to a .blob file so it can be used on the OpenCV AI Kit using the [online BlobConverter app from Luxonis](http://69.164.214.171:8083/), which can be used with the following code.
+After converting your model into OpenVINO IR format, you can compile it to a .blob file so it can be used on the OpenCV AI Kit using the [online BlobConverter app from Luxonis](https://github.com/luxonis/blobconverter), which can be used with the following code.
 
 ```python
-import requests
+xmlfile = f'{output_dir}/frozen_inference_graph.xml'
+binfile = f'{output_dir}/frozen_inference_graph.bin'
+!python -m pip install blobconverter
 
-url = 'http://69.164.214.171:8083/compile'  # change if running against other URL
-
-payload = {
-    'compiler_params': '-ip U8 -VPU_MYRIAD_PLATFORM VPU_MYRIAD_2480 -VPU_NUMBER_OF_SHAVES 4 -VPU_NUMBER_OF_CMX_SLICES 4',
-    'compile_type': 'myriad'
-}
-files = {
-    'definition': open(f'{output_dir}/frozen_inference_graph.xml', 'rb'),
-    'weights': open(f'{output_dir}/frozen_inference_graph.bin', 'rb')
-}
-params = {
-    'version': '2020.1',  # OpenVINO version, can be "2021.1", "2020.4", "2020.3", "2020.2", "2020.1", "2019.R3"
-}
-
-response = requests.post(url, data=payload, files=files, params=params)
-
-with open(f'{output_dir}/model.blob', 'wb') as f:
-  f.write(response.content)
+import blobconverter
+blob_path = blobconverter.from_openvino(
+    xml=xmlfile,
+    bin=binfile,
+    data_type="FP16",
+    shaves=5,
+)
+from google.colab import files
+files.download(blob_path) 
 ```
 
 ## Use new model on the OAK Device
 
-To use the model, just replace the model.blob file inside the model directory with your custom model and then change the labels inside the model.json file to fit your model.
-
-> Note: For whatever reason, I needed to at a null label as the first element
-
-Example:
-```json
-{
-    "NN_config": {
-        "output_format" : "detection",
-        "NN_family" : "mobilenet",
-        "confidence_threshold" : 0.5
-    },
-    "mappings": {
-        "labels": [
-            "null",
-            "Raspberry_Pi_3",
-            "Arduino_Nano",
-            "ESP8266",
-            "Heltec_ESP32_Lora"
-        ]
-    }
-}
-```
+To use the model, just replace the model.blob file inside the model directory with your custom model and then change the labels inside the [run_object_detection.py file](run_object_detection.py).
 
 After following the above steps, you can run the model by running the `run_object_detection.py` script.
 

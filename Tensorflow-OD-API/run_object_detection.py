@@ -1,69 +1,109 @@
-# based on https://github.com/luxonis/depthai-tutorials/tree/master/1-hello-world
 from pathlib import Path
-import json
+import cv2
+import depthai as dai
+import numpy as np
+import time
+import argparse
 
-import cv2  # opencv - display the video stream
-import depthai  # access the camera and its data packets
+nnPathDefault = str(
+    (Path(__file__).parent / Path('model/model.blob')).resolve().absolute())
+parser = argparse.ArgumentParser()
+parser.add_argument('nnPath', nargs='?',
+                    help="Path to mobilenet detection network blob", default=nnPathDefault)
+parser.add_argument('-s', '--sync', action="store_true",
+                    help="Sync RGB output with NN output", default=False)
+args = parser.parse_args()
 
-device = depthai.Device('', False)
+# MobilenetSSD label texts
+labelMap = ["Raspberry_Pi_3", "Arduino_Nano", "ESP8266", "Heltec_ESP32_Lora"]
 
-config = {
-    'streams': ['previewout', 'metaout'],
-    'ai': {
-        "blob_file": str(Path('./model/model.blob').resolve().absolute()),
-        "blob_file_config": str(Path('./model/model.json').resolve().absolute()),
-    }
-}
+# Create pipeline
+pipeline = dai.Pipeline()
+pipeline.setOpenVINOVersion(dai.OpenVINO.Version.VERSION_2021_2)
 
-# Create the pipeline using the 'previewout' stream, establishing the first connection to the device.
-pipeline = device.create_pipeline(config=config)
+# Define sources and outputs
+camRgb = pipeline.createColorCamera()
+nn = pipeline.createMobileNetDetectionNetwork()
+xoutRgb = pipeline.createXLinkOut()
+nnOut = pipeline.createXLinkOut()
 
-# Retrieve model class labels from model config file.
-model_config_file = config['ai']['blob_file_config']
-mcf = open(model_config_file)
-model_config_dict = json.load(mcf)
-labels = model_config_dict['mappings']['labels'] if 'mappings' in model_config_dict else None
+xoutRgb.setStreamName("rgb")
+nnOut.setStreamName("nn")
 
-if pipeline is None:
-    raise RuntimeError('Pipeline creation failed!')
+# Properties
+camRgb.setPreviewSize(300, 300)
+camRgb.setInterleaved(False)
+camRgb.setFps(40)
+# Define a neural network that will make predictions based on the source frames
+nn.setConfidenceThreshold(0.5)
+nn.setBlobPath(args.nnPath)
+nn.setNumInferenceThreads(2)
+nn.input.setBlocking(False)
 
-detections = []
+# Linking
+if args.sync:
+    nn.passthrough.link(xoutRgb.input)
+else:
+    camRgb.preview.link(xoutRgb.input)
 
-while True:
-    # Retrieve data packets from the device.
-    # A data packet contains the video frame data.
-    nnet_packets, data_packets = pipeline.get_available_nnet_and_data_packets()
+camRgb.preview.link(nn.input)
+nn.out.link(nnOut.input)
 
-    for nnet_packet in nnet_packets:
-        detections = list(nnet_packet.getDetectedObjects())
+# Connect to device and start pipeline
+with dai.Device(pipeline) as device:
 
-    for packet in data_packets:
-        # By default, DepthAI adds other streams (notably 'meta_2dh'). Only process `previewout`.
-        if packet.stream_name == 'previewout':
-            data = packet.getData()
-            # change shape (3, 300, 300) -> (300, 300, 3)
-            data0 = data[0, :, :]
-            data1 = data[1, :, :]
-            data2 = data[2, :, :]
-            frame = cv2.merge([data0, data1, data2])
+    # Output queues will be used to get the rgb frames and nn data from the outputs defined above
+    qRgb = device.getOutputQueue(name="rgb", maxSize=4, blocking=False)
+    qDet = device.getOutputQueue(name="nn", maxSize=4, blocking=False)
 
-            img_h = frame.shape[0]
-            img_w = frame.shape[1]
+    frame = None
+    detections = []
+    startTime = time.monotonic()
+    counter = 0
+    color2 = (255, 255, 255)
 
-            for detection in detections:
-                pt1 = int(detection.x_min * img_w), int(detection.y_min * img_h)
-                pt2 = int(detection.x_max * img_w), int(detection.y_max * img_h)
-                print(int(detection.label))
-                label = labels[int(detection.label)] if labels != None else int(detection.label)
-                score = int(detection.confidence * 100)
-                cv2.rectangle(frame, pt1, pt2, (0, 0, 255), 2)
-                cv2.putText(frame, str(score) + '% ' + str(label), (pt1[0] + 2, pt1[1] + 15), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
+    # nn data (bounding box locations) are in <0..1> range - they need to be normalized with frame width/height
+    def frameNorm(frame, bbox):
+        normVals = np.full(len(bbox), frame.shape[0])
+        normVals[::2] = frame.shape[1]
+        return (np.clip(np.array(bbox), 0, 1) * normVals).astype(int)
 
-            cv2.imshow('previewout', frame)
+    def displayFrame(name, frame):
+        color = (255, 0, 0)
+        for detection in detections:
+            bbox = frameNorm(
+                frame, (detection.xmin, detection.ymin, detection.xmax, detection.ymax))
+            cv2.putText(frame, labelMap[detection.label], (bbox[0] +
+                                                           10, bbox[1] + 20), cv2.FONT_HERSHEY_TRIPLEX, 0.5, color)
+            cv2.putText(frame, f"{int(detection.confidence * 100)}%",
+                        (bbox[0] + 10, bbox[1] + 40), cv2.FONT_HERSHEY_TRIPLEX, 0.5, color)
+            cv2.rectangle(frame, (bbox[0], bbox[1]),
+                          (bbox[2], bbox[3]), color, 2)
+        # Show the frame
+        cv2.imshow(name, frame)
 
-    if cv2.waitKey(1) == ord('q'):
-        break
+    while True:
+        if args.sync:
+            # Use blocking get() call to catch frame and inference result synced
+            inRgb = qRgb.get()
+            inDet = qDet.get()
+        else:
+            # Instead of get (blocking), we use tryGet (nonblocking) which will return the available data or None otherwise
+            inRgb = qRgb.tryGet()
+            inDet = qDet.tryGet()
 
-# The pipeline object should be deleted after exiting the loop. Otherwise device will continue working.
-# This is required if you are going to add code after exiting the loop.
-del device
+        if inRgb is not None:
+            frame = inRgb.getCvFrame()
+            cv2.putText(frame, "NN fps: {:.2f}".format(counter / (time.monotonic() - startTime)),
+                        (2, frame.shape[0] - 4), cv2.FONT_HERSHEY_TRIPLEX, 0.4, color2)
+
+        if inDet is not None:
+            detections = inDet.detections
+            counter += 1
+
+        # If the frame is available, draw bounding boxes on it and show the frame
+        if frame is not None:
+            displayFrame("rgb", frame)
+
+        if cv2.waitKey(1) == ord('q'):
+            break

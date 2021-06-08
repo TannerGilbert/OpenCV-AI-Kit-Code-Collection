@@ -28,22 +28,28 @@ After you have an exported model (.pb file), you can convert it into an OpenVINO
 
 1. Installation
     ```python
-    %%time
-    %%capture
-    ## install tools. Open Vino takes some time to download: 10-15 min sometimes.
+    import os
+    from urllib.parse import urlparse
+
+    ## install tools. Open Vino takes some time to download - it's ~400MB
     !sudo apt-get install -y pciutils cpio
     !sudo apt autoremove
+
     ## downnload installation files
-    !wget https://registrationcenter-download.intel.com/akdlm/irc_nas/17504/l_openvino_toolkit_p_2021.2.185.tgz
-    path = "l_openvino_toolkit_p_2021.2.185.tgz"
-    ## install openvino
-    !tar xf "{path}"
-    %cd l_openvino_toolkit_p_2021.2.185/
+    url = "https://registrationcenter-download.intel.com/akdlm/irc_nas/17662/l_openvino_toolkit_p_2021.3.394.tgz"
+    !wget {url}
+
+    ## Get the name of the tgz
+    parsed = urlparse(url)
+    openvino_tgz = os.path.basename(parsed.path)
+    openvino_folder = os.path.splitext(openvino_tgz)[0]
+
+    ## Extract & install openvino
+    !tar xf {openvino_tgz}
+    %cd {openvino_folder}
     !./install_openvino_dependencies.sh && \
         sed -i 's/decline/accept/g' silent.cfg && \
         ./install.sh --silent silent.cfg
-    %cd /opt/intel/openvino_2021.2.185/deployment_tools/model_optimizer/install_prerequisites/
-    !./install_prerequisites_tf.sh
     ```
 2. Create config file
     yolo_v3_tiny.json:
@@ -67,8 +73,13 @@ After you have an exported model (.pb file), you can convert it into an OpenVINO
     ```
     output_dir = '/content/yolov3_tiny'
 
-    !source /opt/intel/openvino_2021.2.185/bin/setupvars.sh && \
-        python /opt/intel/openvino_2021.2.185/deployment_tools/model_optimizer/mo.py \
+    # Get openvino installation path
+    openvino = !find /opt/intel -type d -name openvino*
+
+    !python -mpip install -r {openvino[0]}/deployment_tools/model_optimizer/requirements.txt
+
+    !source {openvino[0]}/bin/setupvars.sh && \
+        python {openvino[0]}/deployment_tools/model_optimizer/mo.py \
         --input_model /content/darknet/tensorflow-yolo-v3/frozen_darknet_yolov3_model.pb \
         --tensorflow_use_custom_operations_config /content/darknet/yolo_v3_tiny.json \
         --batch 1 \
@@ -79,29 +90,23 @@ After you have an exported model (.pb file), you can convert it into an OpenVINO
 
 ## Compile the IR model to a .blob for use on DepthAI modules/platform
 
-After converting your model into OpenVINO IR format, you can compile it to a .blob file so it can be used on the OpenCV AI Kit using the [online BlobConverter app from Luxonis](http://69.164.214.171:8083/), which can be used with the following code.
+After converting your model into OpenVINO IR format, you can compile it to a .blob file so it can be used on the OpenCV AI Kit using the [online BlobConverter app from Luxonis](https://github.com/luxonis/blobconverter), which can be used with the following code.
 
 ```python
-import requests
+binfile = f'{output_dir}/frozen_darknet_yolov3_model.bin'
+xmlfile = f'{output_dir}/frozen_darknet_yolov3_model.xml'
 
-url = "http://69.164.214.171:8083/compile"  # change if running against other URL
+!python -m pip install blobconverter
 
-payload = {
-    'compiler_params': '-ip U8 -VPU_NUMBER_OF_SHAVES 8 -VPU_NUMBER_OF_CMX_SLICES 8',
-    'compile_type': 'myriad'
-}
-files = [
-    ('definition', open(f'{output_dir}/frozen_darknet_yolov3_model.xml', 'rb')),
-    ('weights', open(f'{output_dir}/frozen_darknet_yolov3_model.bin', 'rb'))
-]
-params = {
-    'version': '2021.1',  # OpenVINO version, can be "2021.1", "2020.4", "2020.3", "2020.2", "2020.1", "2019.R3"
-}
-
-response = requests.post(url, data=payload, files=files, params=params)
-
-with open(f'{output_dir}/model.blob', 'wb') as f:
-  f.write(response.content)
+import blobconverter
+blob_path = blobconverter.from_openvino(
+    xml=xmlfile,
+    bin=binfile,
+    data_type="FP16",
+    shaves=5,
+)
+from google.colab import files
+files.download(blob_path) 
 ```
 
 ## Use new model on the OAK Device

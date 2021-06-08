@@ -9,4 +9,4 @@
 
 ## Resources
 * [DepthAI's documentation](https://docs.luxonis.com/en/latest)
-* [OAK videos be Brandon Gilles](https://www.youtube.com/channel/UC3ikJfJPfsZshXT70qk8oYA/videos)
+* [OAK videos by Brandon Gilles](https://www.youtube.com/channel/UC3ikJfJPfsZshXT70qk8oYA/videos)
