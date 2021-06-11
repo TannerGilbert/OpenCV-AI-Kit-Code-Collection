@@ -1,137 +1,229 @@
 from pathlib import Path
-import json
 import cv2
 import argparse
 import numpy as np
-import depthai
+import time
+import depthai as dai
 
 from trackable_object import TrackableObject
 from centroid_tracker import CentroidTracker
 
 
-def main():
-    parser = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter)
-    parser.add_argument('-m', '--model', type=str, required=True, help='File path of .blob file.')
-    parser.add_argument('-c', '--config', type=str, required=True, help='File path of config file.')
-    parser.add_argument('-roi', '--roi_position', type=float, default=0.6, help='ROI Position (0-1)')
-    parser.add_argument('-a', '--axis', default=True, action="store_false", help='Axis for cumulative counting (default=x axis)')
-    parser.add_argument('-sh', '--show', default=True, action="store_false", help='Show output')
-    args = parser.parse_args()
+parser = argparse.ArgumentParser(
+    formatter_class=argparse.ArgumentDefaultsHelpFormatter)
+parser.add_argument('-m', '--model', type=str,
+                    required=True, help='File path of .blob file.')
+parser.add_argument('-v', '--video_path', type=str, default='',
+                    help='Path to video. If empty OAK-RGB camera is used. (default=\'\')')
+parser.add_argument('-roi', '--roi_position', type=float,
+                    default=0.5, help='ROI Position (0-1)')
+parser.add_argument('-a', '--axis', default=True, action='store_false',
+                    help='Axis for cumulative counting (default=x axis)')
+parser.add_argument('-sh', '--show', default=True,
+                    action='store_false', help='Show output')
+parser.add_argument('-sp', '--save_path', type=str, default='',
+                    help='Path to save the output. If None output won\'t be saved')
+parser.add_argument('-s', '--sync', action="store_true",
+                    help="Sync RGB output with NN output", default=False)
+args = parser.parse_args()
 
-    device = depthai.Device('', False)
+# Create pipeline
+pipeline = dai.Pipeline()
 
-    config = {
-        'streams': ['previewout', 'metaout'],
-        'ai': {
-            "blob_file": str(Path(args.model).resolve().absolute()),
-            "blob_file_config": str(Path(args.config).resolve().absolute()),
-        }
-    }
+# Define a neural network that will make predictions based on the source frames
+nn = pipeline.createMobileNetDetectionNetwork()
+nn.setConfidenceThreshold(0.4)
+nn.setBlobPath(args.model)
+nn.setNumInferenceThreads(2)
+nn.input.setBlocking(False)
 
-    # Create the pipeline using the 'previewout' stream, establishing the first connection to the device.
-    pipeline = device.create_pipeline(config=config)
+# Define a source for the neural network input
+if args.video_path != '':
+    # Create XLinkIn object as conduit for sending input video file frames
+    # to the neural network
+    xinFrame = pipeline.createXLinkIn()
+    xinFrame.setStreamName("inFrame")
+    # Connect (link) the video stream from the input queue to the
+    # neural network input
+    xinFrame.out.link(nn.input)
+else:
+    # Create color camera node.
+    cam = pipeline.createColorCamera()
+    cam.setPreviewSize(300, 300)
+    cam.setInterleaved(False)
+    # Connect (link) the camera preview output to the neural network input
+    cam.preview.link(nn.input)
 
-    # Retrieve model class labels from model config file.
-    model_config_file = config['ai']['blob_file_config']
-    mcf = open(model_config_file)
-    model_config_dict = json.load(mcf)
-    labels = model_config_dict['mappings']['labels'] if 'mappings' in model_config_dict else None
+    # Create XLinkOut object as conduit for passing camera frames to the host
+    xoutFrame = pipeline.createXLinkOut()
+    xoutFrame.setStreamName("outFrame")
+    cam.preview.link(xoutFrame.input)
 
-    if pipeline is None:
-        raise RuntimeError('Pipeline creation failed!')
+# Create neural network output (inference) stream
+nnOut = pipeline.createXLinkOut()
+nnOut.setStreamName("nn")
+nn.out.link(nnOut.input)
 
+# Pipeline defined, now the device is connected to
+with dai.Device(pipeline) as device:
+
+    # Define queues for image frames
+    if args.video_path != '':
+        # Input queue for sending video frames to device
+        qIn_Frame = device.getInputQueue(
+            name="inFrame", maxSize=4, blocking=False)
+    else:
+        # Output queue for retrieving camera frames from device
+        qOut_Frame = device.getOutputQueue(
+            name="outFrame", maxSize=4, blocking=False)
+
+    qDet = device.getOutputQueue(name="nn", maxSize=4, blocking=False)
+
+    if args.video_path != '':
+        cap = cv2.VideoCapture(args.video_path)
+
+    if args.save_path:
+        if args.video_path != '':
+            width = int(cap.get(3))
+            height = int(cap.get(4))
+            fps = cap.get(cv2.CAP_PROP_FPS)
+        else:
+            width = 300
+            height = 300
+            fps = 30
+
+        print(width, height, fps)
+        out = cv2.VideoWriter(args.save_path, cv2.VideoWriter_fourcc(
+            'M', 'J', 'P', 'G'), fps, (width, height))
+
+    def should_run():
+        return cap.isOpened() if args.video_path != '' else True
+
+    def get_frame():
+        if args.video_path != '':
+            return cap.read()
+        else:
+            in_Frame = qOut_Frame.get()
+            frame = in_Frame.getCvFrame()
+            return True, frame
+
+    startTime = time.monotonic()
     detections = []
-
+    frame_count = 0
     counter = [0, 0, 0, 0]  # left, right, up, down
 
     ct = CentroidTracker(maxDisappeared=40, maxDistance=50)
     trackableObjects = {}
 
-    while True:
-        # Retrieve data packets from the device.
-        # A data packet contains the video frame data.
-        nnet_packets, data_packets = pipeline.get_available_nnet_and_data_packets()
+    def to_planar(arr: np.ndarray, shape: tuple) -> np.ndarray:
+        return cv2.resize(arr, shape).transpose(2, 0, 1).flatten()
 
-        for nnet_packet in nnet_packets:
-            detections = list(nnet_packet.getDetectedObjects())
+    while should_run():
+        # Get image frames from camera or video file
+        read_correctly, frame = get_frame()
+        if not read_correctly:
+            break
 
-        for packet in data_packets:
-            # By default, DepthAI adds other streams (notably 'meta_2dh'). Only process `previewout`.
-            if packet.stream_name == 'previewout':
-                data = packet.getData()
-                # change shape (3, 300, 300) -> (300, 300, 3)
-                data0 = data[0, :, :]
-                data1 = data[1, :, :]
-                data2 = data[2, :, :]
-                frame = cv2.merge([data0, data1, data2])
+        if args.video_path != '':
+            # Prepare image frame from video for sending to device
+            img = dai.ImgFrame()
+            img.setData(to_planar(frame, (300, 300)))
+            img.setTimestamp(time.monotonic())
+            img.setWidth(300)
+            img.setHeight(300)
+            # Use input queue to send video frame to device
+            qIn_Frame.send(img)
+        else:
+            in_Frame = qOut_Frame.tryGet()
 
-                height = frame.shape[0]
-                width = frame.shape[1]
+            if in_Frame is not None:
+                frame = in_Frame.getCvFrame()
+                cv2.putText(frame, "NN fps: {:.2f}".format(frame_count / (time.monotonic() - startTime)),
+                            (2, frame.shape[0] - 4), cv2.FONT_HERSHEY_TRIPLEX, 0.4, color=(255, 255, 255))
 
-                objects = ct.update([
-                    (int(detection.x_min * width), int(detection.y_min * height),
-                    int(detection.x_max * width), int(detection.y_max * height))
-                    for detection in detections
-                ])
+        inDet = qDet.tryGet()
+        if inDet is not None:
+            detections = inDet.detections
+            frame_count += 1
 
-                for (objectID, centroid) in objects.items():
-                    to = trackableObjects.get(objectID, None)
+        if frame is not None:
+            height = frame.shape[0]
+            width = frame.shape[1]
 
-                    if to is None:
-                        to = TrackableObject(objectID, centroid)
-                    else:
-                        if args.axis and not to.counted:
-                            x = [c[0] for c in to.centroids]
-                            direction = centroid[0] - np.mean(x)
+            objects = ct.update([
+                (int(detection.xmin * width), int(detection.ymin * height),
+                 int(detection.xmax * width), int(detection.ymax * height))
+                for detection in detections
+            ])
 
-                            if centroid[0] > args.roi_position*width and direction > 0:
-                                counter[1] += 1
-                                to.counted = True
-                            elif centroid[0] < args.roi_position*width and direction < 0:
-                                counter[0] += 1
-                                to.counted = True
-                            
-                        elif not args.axis and not to.counted:
-                            y = [c[1] for c in to.centroids]
-                            direction = centroid[1] - np.mean(y)
+            for (objectID, centroid) in objects.items():
+                to = trackableObjects.get(objectID, None)
 
-                            if centroid[1] > args.roi_position*height and direction > 0:
-                                counter[3] += 1
-                                to.counted = True
-                            elif centroid[1] < args.roi_position*height and direction < 0:
-                                counter[2] += 1
-                                to.counted = True
-
-                        to.centroids.append(centroid)
-
-                    trackableObjects[objectID] = to
-
-                    text = "ID {}".format(objectID)
-                    cv2.putText(frame, text, (centroid[0] - 10, centroid[1] - 10),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 2)
-                    cv2.circle(frame, (centroid[0], centroid[1]), 4, (255, 255, 255), -1)
-                
-                # Draw ROI line
-                if args.axis:
-                    cv2.line(frame, (int(args.roi_position*width), 0), (int(args.roi_position*width), height), (0xFF, 0, 0), 5)
+                if to is None:
+                    to = TrackableObject(objectID, centroid)
                 else:
-                    cv2.line(frame, (0, int(args.roi_position*height)), (width, int(roi_position*height)), (0xFF, 0, 0), 5)
+                    if args.axis and not to.counted:
+                        x = [c[0] for c in to.centroids]
+                        direction = centroid[0] - np.mean(x)
 
-                # display count and status
-                font = cv2.FONT_HERSHEY_SIMPLEX
-                if args.axis:
-                    cv2.putText(frame, f'Left: {counter[0]}; Right: {counter[1]}', (10, 35), font, 0.8, (0, 0xFF, 0xFF), 2, cv2.FONT_HERSHEY_SIMPLEX)
-                else:
-                    cv2.putText(frame, f'Up: {counter[2]}; Down: {counter[3]}', (10, 35), font, 0.8, (0, 0xFF, 0xFF), 2, cv2.FONT_HERSHEY_SIMPLEX)
+                        if centroid[0] > args.roi_position*width and direction > 0 and np.mean(x) < args.roi_position*width:
+                            counter[1] += 1
+                            to.counted = True
+                        elif centroid[0] < args.roi_position*width and direction < 0 and np.mean(x) > args.roi_position*width:
+                            counter[0] += 1
+                            to.counted = True
 
-                if args.show:
-                    cv2.imshow('cumulative_object_counting', frame)
-                    if cv2.waitKey(25) & 0xFF == ord('q'):
-                        break
+                    elif not args.axis and not to.counted:
+                        y = [c[1] for c in to.centroids]
+                        direction = centroid[1] - np.mean(y)
 
-    cap.release()
+                        if centroid[1] > args.roi_position*height and direction > 0 and np.mean(y) < args.roi_position*height:
+                            counter[3] += 1
+                            to.counted = True
+                        elif centroid[1] < args.roi_position*height and direction < 0 and np.mean(y) > args.roi_position*height:
+                            counter[2] += 1
+                            to.counted = True
+
+                    to.centroids.append(centroid)
+
+                trackableObjects[objectID] = to
+
+                text = "ID {}".format(objectID)
+                cv2.putText(frame, text, (centroid[0] - 10, centroid[1] - 10),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 2)
+                cv2.circle(
+                    frame, (centroid[0], centroid[1]), 4, (255, 255, 255), -1)
+
+            # Draw ROI line
+            if args.axis:
+                cv2.line(frame, (int(args.roi_position*width), 0),
+                         (int(args.roi_position*width), height), (0xFF, 0, 0), 5)
+            else:
+                cv2.line(frame, (0, int(args.roi_position*height)),
+                         (width, int(args.roi_position*height)), (0xFF, 0, 0), 5)
+
+            # display count and status
+            font = cv2.FONT_HERSHEY_SIMPLEX
+            if args.axis:
+                cv2.putText(frame, f'Left: {counter[0]}; Right: {counter[1]}', (
+                    10, 35), font, 0.8, (0, 0xFF, 0xFF), 2, cv2.FONT_HERSHEY_SIMPLEX)
+            else:
+                cv2.putText(frame, f'Up: {counter[2]}; Down: {counter[3]}', (
+                    10, 35), font, 0.8, (0, 0xFF, 0xFF), 2, cv2.FONT_HERSHEY_SIMPLEX)
+
+            if args.show:
+                cv2.imshow('cumulative_object_counting', frame)
+                if cv2.waitKey(25) & 0xFF == ord('q'):
+                    break
+
+            if args.save_path:
+                out.write(frame)
+
     cv2.destroyAllWindows()
-    del device
 
-if __name__ == '__main__':
-    main()
+    if args.video_path != '':
+        cap.release()
+
+    if args.save_path:
+        print('out release')
+        out.release()
